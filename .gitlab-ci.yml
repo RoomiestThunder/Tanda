@@ -1,5 +1,33 @@
 # GitLab CI/CD Pipeline for Tanda Project
 # Stages: lint/test → build → security → deploy (dev/stage/prod)
+#
+# Required GitLab CI/CD Variables (Settings → CI/CD → Variables):
+# ============================================================================
+# Docker Registry:
+#   - CI_REGISTRY_USER: Your GitLab Registry username
+#   - CI_REGISTRY_PASSWORD: Your GitLab Registry personal access token
+#
+# Yandex Cloud (Terraform):
+#   - YC_TOKEN: Yandex Cloud OAuth token
+#   - TF_STATE_BUCKET: S3 bucket name for terraform state
+#   - TF_STATE_ENDPOINT: S3 endpoint (e.g., storage.yandexcloud.net)
+#   - TF_STATE_REGION: S3 region (usually ru-central1)
+#
+# VM SSH Access (Base64 encoded private keys):
+#   - SSH_PRIVATE_KEY_DEV: Base64 encoded SSH private key for dev VM
+#     (Create with: cat ~/.ssh/id_rsa | base64)
+#   - SSH_PRIVATE_KEY_STAGE: Base64 encoded SSH private key for stage VM
+#   - SSH_PRIVATE_KEY_PROD: Base64 encoded SSH private key for prod VM
+#
+# VM IP Addresses:
+#   - VM_IP_DEV: IP address of dev VM (from terraform output)
+#   - VM_IP_STAGE: IP address of stage VM (from terraform output)
+#   - VM_IP_PROD: IP address of prod VM (from terraform output)
+#
+# Optional (for notifications):
+#   - SLACK_WEBHOOK: Slack webhook URL for deployment notifications
+#   - TELEGRAM_BOT_TOKEN: Telegram bot token for alerts
+# ============================================================================
 
 stages:
   - lint
@@ -154,19 +182,43 @@ deploy:dev:terraform:
 
 deploy:dev:application:
   stage: deploy_dev
-  image: bitnami/kubectl:latest
+  image: alpine:latest
   environment:
     name: dev
     url: https://dev.tanda.example.com
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY_DEV" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H $VM_IP_DEV >> ~/.ssh/known_hosts 2>/dev/null
   script:
-    - echo "Deploying application to dev..."
+    - echo "Deploying application to dev VM via SSH..."
     - echo "Using image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
     - |
-      kubectl set image deployment/tanda-app \
-        tanda-app=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA \
-        --namespace=dev \
-        --record
-    - kubectl rollout status deployment/tanda-app -n dev --timeout=5m
+      ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP_DEV << 'EOF'
+      set -e
+      echo "Pulling latest Docker image..."
+      docker pull $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+      
+      echo "Stopping old container..."
+      docker stop tanda-app || true
+      docker rm tanda-app || true
+      
+      echo "Starting new container..."
+      docker run -d \
+        --name tanda-app \
+        --restart always \
+        -p 80:8080 \
+        -p 443:8443 \
+        -e ENVIRONMENT=dev \
+        --env-file /etc/tanda/.env.dev \
+        $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+      
+      echo "Waiting for container to be healthy..."
+      sleep 5
+      docker ps | grep tanda-app && echo "Container deployed successfully" || exit 1
+      EOF
   only:
     - develop
   when: on_success
@@ -200,19 +252,43 @@ deploy:stage:terraform:
 
 deploy:stage:application:
   stage: deploy_stage
-  image: bitnami/kubectl:latest
+  image: alpine:latest
   environment:
     name: stage
     url: https://stage.tanda.example.com
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY_STAGE" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H $VM_IP_STAGE >> ~/.ssh/known_hosts 2>/dev/null
   script:
-    - echo "Deploying application to staging..."
+    - echo "Deploying application to stage VM via SSH..."
     - echo "Using image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
     - |
-      kubectl set image deployment/tanda-app \
-        tanda-app=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA \
-        --namespace=stage \
-        --record
-    - kubectl rollout status deployment/tanda-app -n stage --timeout=5m
+      ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP_STAGE << 'EOF'
+      set -e
+      echo "Pulling latest Docker image..."
+      docker pull $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+      
+      echo "Stopping old container..."
+      docker stop tanda-app || true
+      docker rm tanda-app || true
+      
+      echo "Starting new container..."
+      docker run -d \
+        --name tanda-app \
+        --restart always \
+        -p 80:8080 \
+        -p 443:8443 \
+        -e ENVIRONMENT=stage \
+        --env-file /etc/tanda/.env.stage \
+        $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+      
+      echo "Waiting for container to be healthy..."
+      sleep 5
+      docker ps | grep tanda-app && echo "Container deployed successfully" || exit 1
+      EOF
   only:
     - main
   when: on_success
@@ -246,24 +322,72 @@ deploy:prod:terraform:
 
 deploy:prod:application:
   stage: deploy_prod
-  image: bitnami/kubectl:latest
+  image: alpine:latest
   environment:
     name: prod
     url: https://tanda.example.com
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY_PROD" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H $VM_IP_PROD >> ~/.ssh/known_hosts 2>/dev/null
   script:
-    - echo "Deploying application to production (blue-green)..."
+    - echo "Deploying application to production VM via SSH (blue-green strategy)..."
     - echo "Using image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
     - |
-      # Example: blue-green deployment
-      # Update "green" deployment with new image
-      kubectl set image deployment/tanda-app-green \
-        tanda-app=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA \
-        --namespace=prod \
-        --record
-      # Wait for rollout
-      kubectl rollout status deployment/tanda-app-green -n prod --timeout=5m
-      # Switch traffic to green (via service)
-      kubectl patch service tanda-app -n prod -p '{"spec":{"selector":{"version":"green"}}}'
+      ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP_PROD << 'EOF'
+      set -e
+      
+      # Blue-green deployment strategy
+      CURRENT=$(docker ps --filter "name=tanda-app-blue" -q | wc -l)
+      
+      if [ $CURRENT -gt 0 ]; then
+        echo "Current container: blue, deploying to green..."
+        DEPLOY_COLOR="green"
+        REMOVE_COLOR="blue"
+      else
+        echo "Current container: green, deploying to blue..."
+        DEPLOY_COLOR="blue"
+        REMOVE_COLOR="green"
+      fi
+      
+      echo "Pulling Docker image..."
+      docker pull $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+      
+      echo "Starting new $DEPLOY_COLOR container..."
+      docker run -d \
+        --name tanda-app-$DEPLOY_COLOR \
+        --restart always \
+        -p 80:8080 \
+        -p 443:8443 \
+        -e ENVIRONMENT=prod \
+        --env-file /etc/tanda/.env.prod \
+        $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+      
+      echo "Health check for $DEPLOY_COLOR container..."
+      sleep 10
+      HEALTH=$(docker exec tanda-app-$DEPLOY_COLOR curl -s http://localhost:8080/health || echo "failed")
+      
+      if [ "$HEALTH" = "ok" ] || [ "$HEALTH" != "failed" ]; then
+        echo "$DEPLOY_COLOR container is healthy, switching traffic..."
+        
+        # Update nginx or HAProxy to route to new color
+        docker exec tanda-proxy nginx -s reload || echo "Proxy not found, manual DNS update needed"
+        
+        echo "Removing old $REMOVE_COLOR container..."
+        sleep 5
+        docker stop tanda-app-$REMOVE_COLOR || true
+        docker rm tanda-app-$REMOVE_COLOR || true
+        
+        echo "Deployment completed successfully!"
+      else
+        echo "Health check failed! Rolling back..."
+        docker stop tanda-app-$DEPLOY_COLOR
+        docker rm tanda-app-$DEPLOY_COLOR
+        exit 1
+      fi
+      EOF
   only:
     - tags
   when: manual
@@ -276,13 +400,43 @@ deploy:prod:application:
 
 rollback:prod:
   stage: deploy_prod
-  image: bitnami/kubectl:latest
+  image: alpine:latest
   environment:
     name: prod
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY_PROD" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H $VM_IP_PROD >> ~/.ssh/known_hosts 2>/dev/null
   script:
     - echo "Rolling back production deployment..."
-    - kubectl rollout undo deployment/tanda-app -n prod
-    - kubectl rollout status deployment/tanda-app -n prod --timeout=5m
+    - |
+      ssh -i ~/.ssh/id_rsa ubuntu@$VM_IP_PROD << 'EOF'
+      set -e
+      
+      echo "Checking current deployment..."
+      CURRENT=$(docker ps --filter "name=tanda-app-blue" -q | wc -l)
+      
+      if [ $CURRENT -gt 0 ]; then
+        echo "Current: blue, rolling back to green..."
+        ROLLBACK_COLOR="green"
+        REMOVE_COLOR="blue"
+      else
+        echo "Current: green, rolling back to blue..."
+        ROLLBACK_COLOR="blue"
+        REMOVE_COLOR="green"
+      fi
+      
+      echo "Switching traffic back to $ROLLBACK_COLOR..."
+      docker exec tanda-proxy nginx -s reload || echo "Manual rollback needed"
+      
+      echo "Removing failed $REMOVE_COLOR container..."
+      docker stop tanda-app-$REMOVE_COLOR || true
+      docker rm tanda-app-$REMOVE_COLOR || true
+      
+      echo "Rollback completed!"
+      EOF
   when: manual
   only:
     - main

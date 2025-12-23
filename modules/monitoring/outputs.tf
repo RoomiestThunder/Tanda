@@ -1,11 +1,25 @@
 output "prometheus_endpoint" {
-  value = "prometheus.monitoring:9090"
+  value       = "http://monitoring-vm:9090"
+  description = "Prometheus endpoint for VM deployment"
 }
 
 output "loki_endpoint" {
-  value = "loki.monitoring:3100"
+  value       = "http://monitoring-vm:3100"
+  description = "Loki endpoint for VM deployment"
 }
 
 output "grafana_endpoint" {
-  value = "grafana.monitoring:80"
+  value       = "http://monitoring-vm:3000"
+  description = "Grafana endpoint for VM deployment"
 }
+
+output "alertmanager_endpoint" {
+  value       = "http://monitoring-vm:9093"
+  description = "Alertmanager endpoint for VM deployment"
+}
+
+output "node_exporter_endpoint" {
+  value       = "http://monitoring-vm:9100"
+  description = "Node Exporter endpoint for VM deployment"
+}
+

@@ -278,17 +278,29 @@ terraform apply
 terraform destroy -target=module.app
 ```
 
-### Application Rollback (Kubernetes/Docker)
+### Application Rollback (Docker via SSH)
 
 ```bash
-# If using Kubernetes:
-kubectl rollout undo deployment/tanda-app -n prod
+# SSH into production VM
+ssh -i ~/.ssh/tanda_key ubuntu@PROD_VM_IP
 
-# If using Docker directly:
-# Restart with previous image tag
+# List running containers
+docker ps -a
+
+# Stop current container and restart with previous image
 docker pull myregistry/tanda:v1.0.0
 docker stop tanda-app
-docker run --restart unless-stopped -d --name tanda-app myregistry/tanda:v1.0.0
+docker rm tanda-app
+docker run --restart unless-stopped -d \
+  --name tanda-app \
+  -p 80:8080 \
+  -p 443:8443 \
+  -e ENVIRONMENT=prod \
+  --env-file /etc/tanda/.env.prod \
+  myregistry/tanda:v1.0.0
+
+# Verify container is running
+docker ps | grep tanda-app
 ```
 
 ### GitLab CI Rollback
@@ -298,6 +310,7 @@ docker run --restart unless-stopped -d --name tanda-app myregistry/tanda:v1.0.0
 # 1. Go to CI/CD > Pipelines
 # 2. Find previous successful pipeline
 # 3. Click "Retry" on the deploy job
+# This will redeploy the previous image via SSH
 ```
 
 ---
@@ -344,10 +357,20 @@ terraform apply -var-file=envs/prod.tfvars
 docker build -t myregistry/tanda:v1.1.0 .
 docker push myregistry/tanda:v1.1.0
 
-# GitLab CI will automatically deploy if merged to main/tag created
-# Or manually trigger:
-kubectl set image deployment/tanda-app \
-  tanda-app=myregistry/tanda:v1.1.0 -n prod
+# GitLab CI will automatically deploy via SSH if merged to main
+# Or manually deploy from VM:
+ssh -i ~/.ssh/tanda_key ubuntu@PROD_VM_IP << 'EOF'
+docker pull myregistry/tanda:v1.1.0
+docker stop tanda-app
+docker rm tanda-app
+docker run --restart unless-stopped -d \
+  --name tanda-app \
+  -p 80:8080 \
+  -p 443:8443 \
+  -e ENVIRONMENT=prod \
+  --env-file /etc/tanda/.env.prod \
+  myregistry/tanda:v1.1.0
+EOF
 ```
 
 ---
