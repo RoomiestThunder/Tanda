@@ -7,3 +7,10 @@ crash.log
 *.backup
 /.idea/
 /.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
