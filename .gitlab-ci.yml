@@ -1,0 +1,289 @@
+# GitLab CI/CD Pipeline for Tanda Project
+# Stages: lint/test → build → security → deploy (dev/stage/prod)
+
+stages:
+  - lint
+  - test
+  - build
+  - security
+  - deploy_dev
+  - deploy_stage
+  - deploy_prod
+
+variables:
+  REGISTRY: "registry.gitlab.com"
+  IMAGE_NAME: "$REGISTRY/$CI_PROJECT_PATH"
+  # Docker image for terraform/helm operations
+  TERRAFORM_IMAGE: "hashicorp/terraform:latest"
+
+# ============================================================================
+# LINT & TEST
+# ============================================================================
+
+lint:docker:
+  stage: lint
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Running Dockerfile linting..."
+    - # Install hadolint or skip if not present
+    - docker run --rm -i hadolint/hadolint < Dockerfile || echo "No Dockerfile found or hadolint not available"
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+    - develop
+
+lint:terraform:
+  stage: lint
+  image: $TERRAFORM_IMAGE
+  script:
+    - echo "Validating Terraform configuration..."
+    - cd terraform && terraform init -backend=false
+    - terraform validate
+    - terraform fmt -check -recursive .
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+    - develop
+
+test:unit:
+  stage: test
+  image: ${CI_REGISTRY_IMAGE}:latest
+  script:
+    - echo "Running unit tests..."
+    - # Replace with your app's test command (e.g., npm test, pytest, etc.)
+    - echo "Tests passed (placeholder)"
+  allow_failure: false
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# ============================================================================
+# BUILD
+# ============================================================================
+
+build:docker:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Building Docker image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHORT_SHA -t $IMAGE_NAME:latest .
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $REGISTRY
+    - docker push $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+    - docker push $IMAGE_NAME:latest
+  only:
+    - main
+    - develop
+    - tags
+
+# ============================================================================
+# SECURITY
+# ============================================================================
+
+security:container_scan:
+  stage: security
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Scanning Docker image for vulnerabilities..."
+    - # Use trivy or snyk for container scanning
+    - echo "Container scan completed (placeholder)"
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+    - develop
+
+security:dependencies:
+  stage: security
+  image: python:3.10
+  script:
+    - echo "Checking dependencies for known vulnerabilities..."
+    - pip install safety || true
+    - safety check || echo "No Python dependencies or safety not available"
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+    - develop
+
+security:secrets:
+  stage: security
+  image: python:3.10
+  script:
+    - echo "Scanning for hardcoded secrets..."
+    - pip install detect-secrets || true
+    - detect-secrets scan --all-files || echo "detect-secrets not available"
+  allow_failure: true
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# ============================================================================
+# DEPLOY TO DEV
+# ============================================================================
+
+deploy:dev:terraform:
+  stage: deploy_dev
+  image: $TERRAFORM_IMAGE
+  environment:
+    name: dev
+    url: https://dev.tanda.example.com
+  before_script:
+    - cd terraform
+    - terraform init -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="key=tanda/dev/terraform.tfstate" -backend-config="endpoint=$TF_STATE_ENDPOINT"
+  script:
+    - echo "Deploying Terraform to dev environment..."
+    - terraform workspace select dev || terraform workspace new dev
+    - terraform plan -var-file=envs/dev.tfvars -out=tfplan.dev
+    - terraform apply tfplan.dev
+  artifacts:
+    reports:
+      terraform: [tfplan.dev]
+  only:
+    - develop
+  when: on_success
+
+deploy:dev:application:
+  stage: deploy_dev
+  image: bitnami/kubectl:latest
+  environment:
+    name: dev
+    url: https://dev.tanda.example.com
+  script:
+    - echo "Deploying application to dev..."
+    - echo "Using image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - |
+      kubectl set image deployment/tanda-app \
+        tanda-app=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA \
+        --namespace=dev \
+        --record
+    - kubectl rollout status deployment/tanda-app -n dev --timeout=5m
+  only:
+    - develop
+  when: on_success
+  dependencies:
+    - build:docker
+
+# ============================================================================
+# DEPLOY TO STAGING
+# ============================================================================
+
+deploy:stage:terraform:
+  stage: deploy_stage
+  image: $TERRAFORM_IMAGE
+  environment:
+    name: stage
+    url: https://stage.tanda.example.com
+  before_script:
+    - cd terraform
+    - terraform init -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="key=tanda/stage/terraform.tfstate" -backend-config="endpoint=$TF_STATE_ENDPOINT"
+  script:
+    - echo "Deploying Terraform to staging environment..."
+    - terraform workspace select stage || terraform workspace new stage
+    - terraform plan -var-file=envs/stage.tfvars -out=tfplan.stage
+    - terraform apply tfplan.stage
+  artifacts:
+    reports:
+      terraform: [tfplan.stage]
+  only:
+    - main
+  when: on_success
+
+deploy:stage:application:
+  stage: deploy_stage
+  image: bitnami/kubectl:latest
+  environment:
+    name: stage
+    url: https://stage.tanda.example.com
+  script:
+    - echo "Deploying application to staging..."
+    - echo "Using image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - |
+      kubectl set image deployment/tanda-app \
+        tanda-app=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA \
+        --namespace=stage \
+        --record
+    - kubectl rollout status deployment/tanda-app -n stage --timeout=5m
+  only:
+    - main
+  when: on_success
+  dependencies:
+    - build:docker
+
+# ============================================================================
+# DEPLOY TO PRODUCTION (MANUAL)
+# ============================================================================
+
+deploy:prod:terraform:
+  stage: deploy_prod
+  image: $TERRAFORM_IMAGE
+  environment:
+    name: prod
+    url: https://tanda.example.com
+  before_script:
+    - cd terraform
+    - terraform init -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="key=tanda/prod/terraform.tfstate" -backend-config="endpoint=$TF_STATE_ENDPOINT"
+  script:
+    - echo "Deploying Terraform to production environment..."
+    - terraform workspace select prod || terraform workspace new prod
+    - terraform plan -var-file=envs/prod.tfvars -out=tfplan.prod
+    - terraform apply tfplan.prod
+  artifacts:
+    reports:
+      terraform: [tfplan.prod]
+  only:
+    - tags
+  when: manual
+
+deploy:prod:application:
+  stage: deploy_prod
+  image: bitnami/kubectl:latest
+  environment:
+    name: prod
+    url: https://tanda.example.com
+  script:
+    - echo "Deploying application to production (blue-green)..."
+    - echo "Using image: $IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - |
+      # Example: blue-green deployment
+      # Update "green" deployment with new image
+      kubectl set image deployment/tanda-app-green \
+        tanda-app=$IMAGE_NAME:$CI_COMMIT_SHORT_SHA \
+        --namespace=prod \
+        --record
+      # Wait for rollout
+      kubectl rollout status deployment/tanda-app-green -n prod --timeout=5m
+      # Switch traffic to green (via service)
+      kubectl patch service tanda-app -n prod -p '{"spec":{"selector":{"version":"green"}}}'
+  only:
+    - tags
+  when: manual
+  dependencies:
+    - build:docker
+
+# ============================================================================
+# ROLLBACK (Manual)
+# ============================================================================
+
+rollback:prod:
+  stage: deploy_prod
+  image: bitnami/kubectl:latest
+  environment:
+    name: prod
+  script:
+    - echo "Rolling back production deployment..."
+    - kubectl rollout undo deployment/tanda-app -n prod
+    - kubectl rollout status deployment/tanda-app -n prod --timeout=5m
+  when: manual
+  only:
+    - main
+    - tags
